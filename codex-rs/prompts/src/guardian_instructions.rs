@@ -65,13 +65,20 @@ impl ContextualUserFragment for GuardianPolicyInstructions<'_> {
             policy_template,
             output_contract,
         } = *self;
+        let extra_policy = extra_policy.trim();
         // Substitute only template text, leaving placeholder-like text in either policy literal.
         let prompt = policy_template
             .trim_end()
             .split(TENANT_POLICY_CONFIG_PLACEHOLDER)
-            .map(|part| part.replace(EXTRA_POLICY_PLACEHOLDER, extra_policy.trim()))
+            .map(|part| part.replace(EXTRA_POLICY_PLACEHOLDER, extra_policy))
             .collect::<Vec<_>>()
             .join(tenant_policy_config.trim());
+        let prompt =
+            if !extra_policy.is_empty() && !policy_template.contains(EXTRA_POLICY_PLACEHOLDER) {
+                format!("{prompt}\n\n# Additional Policy\n{extra_policy}")
+            } else {
+                prompt
+            };
         let instructions = format!("{prompt}\n\n{output_contract}\n");
         input_text(match transcript_format {
             TranscriptFormat::Line => instructions,

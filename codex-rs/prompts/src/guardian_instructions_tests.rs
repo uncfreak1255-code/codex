@@ -4,12 +4,14 @@ use codex_context_fragments::ContextualUserFragment;
 use codex_guardian_context::TRANSCRIPT_JSON_INSTRUCTIONS;
 use codex_guardian_context::truncate_text;
 use codex_protocol::TranscriptFormat;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol_test_support::ContentItemTestExt;
 use pretty_assertions::assert_eq;
 
 use super::GuardianClassifierInstructions;
 use super::GuardianPolicyInstructions;
 use super::render_guardian_rejection;
+use crate::ResolvedModelMessages;
 
 #[test]
 fn reviewer_policy_substitution_preserves_template_layout_and_appends_contract() {
@@ -61,22 +63,87 @@ fn reviewer_extra_policy_substitution_preserves_tenant_policy() {
         ),
         (
             "Tenant: {{ tenant_policy_config }}",
-            "Additional policy.",
+            " \nAdditional policy.\n ",
+            "Tenant: Tenant policy.\n\n# Additional Policy\nAdditional policy.\n\nReview contract.\n",
+        ),
+        (
+            "Tenant: {{ tenant_policy_config }}",
+            " \n\t",
             "Tenant: Tenant policy.\n\nReview contract.\n",
         ),
     ] {
-        assert_eq!(
-            GuardianPolicyInstructions::new(
+        for transcript_format in [TranscriptFormat::Line, TranscriptFormat::Json] {
+            let expected = match transcript_format {
+                TranscriptFormat::Line => expected.to_owned(),
+                TranscriptFormat::Json => format!("{TRANSCRIPT_JSON_INSTRUCTIONS}\n\n{expected}"),
+            };
+            assert_eq!(
+                GuardianPolicyInstructions::new(
+                    transcript_format,
+                    "Tenant policy.",
+                    extra_policy,
+                    template,
+                    "Review contract.",
+                )
+                .render()
+                .expect_text(),
+                expected,
+            );
+        }
+    }
+}
+
+#[test]
+fn reviewer_extra_policy_reaches_catalog_selected_reviewers() {
+    let catalog: ModelsResponse =
+        serde_json::from_str(include_str!("../../models-manager/models.json"))
+            .expect("bundled model catalog");
+    for slug in ["codex-auto-review", "gpt-5.6-luna"] {
+        let mut model = catalog
+            .models
+            .iter()
+            .find(|model| model.slug == slug)
+            .expect("bundled reviewer model")
+            .clone();
+        // A later catalog template must remain effective instead of being replaced
+        // by the bundled fallback just to restore the additional-policy slot.
+        let template = model
+            .model_messages
+            .as_mut()
+            .expect("catalog reviewer messages")
+            .auto_review
+            .as_mut()
+            .expect("catalog auto-review messages")
+            .policy_template
+            .as_mut()
+            .expect("catalog reviewer template");
+        template.insert_str(0, "Catalog-specific reviewer guidance.\n");
+        let messages = ResolvedModelMessages::from_model(&model).auto_review();
+        for extra_policy in [
+            "Require explicit confirmation before deleting protected data.",
+            "Standing permission covers read-only inspection of the workspace.",
+        ] {
+            let rendered = GuardianPolicyInstructions::new(
                 TranscriptFormat::Json,
-                "Tenant policy.",
+                messages.policy,
                 extra_policy,
-                template,
+                messages.policy_template,
                 "Review contract.",
             )
             .render()
-            .expect_text(),
-            format!("{TRANSCRIPT_JSON_INSTRUCTIONS}\n\n{expected}"),
-        );
+            .expect_text();
+            assert!(rendered.contains("Catalog-specific reviewer guidance."));
+            assert!(
+                rendered.contains(messages.policy.trim()),
+                "{slug}: tenant policy missing"
+            );
+            assert_eq!(
+                rendered.matches(extra_policy).count(),
+                1,
+                "{slug}: additional policy missing or duplicated"
+            );
+            assert!(rendered.ends_with("\n\nReview contract.\n"));
+        }
     }
 }
 
@@ -95,6 +162,18 @@ fn reviewer_policy_substitution_keeps_inserted_policy_text_literal() {
         format!(
             "{TRANSCRIPT_JSON_INSTRUCTIONS}\n\nTenant: Tenant says {{{{ tenant_policy_config }}}} and {{{{ extra_policy }}}}.\nAdditional: Additional says {{{{ tenant_policy_config }}}} and {{{{ extra_policy }}}}.\n\nReview contract.\n"
         ),
+    );
+    assert_eq!(
+        GuardianPolicyInstructions::new(
+            TranscriptFormat::Line,
+            "Tenant says {{ tenant_policy_config }} and {{ extra_policy }}.",
+            "Additional says {{ tenant_policy_config }} and {{ extra_policy }}.",
+            "Future catalog instruction.\nTenant: {{ tenant_policy_config }}",
+            "Review contract.",
+        )
+        .render()
+        .expect_text(),
+        "Future catalog instruction.\nTenant: Tenant says {{ tenant_policy_config }} and {{ extra_policy }}.\n\n# Additional Policy\nAdditional says {{ tenant_policy_config }} and {{ extra_policy }}.\n\nReview contract.\n",
     );
 }
 

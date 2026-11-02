@@ -4508,6 +4508,7 @@ dependencies = [
  "codex-utils-absolute-path",
  "codex-utils-template",
  "pretty_assertions",
+ "serde_json",
  "tracing",
 ]
 
